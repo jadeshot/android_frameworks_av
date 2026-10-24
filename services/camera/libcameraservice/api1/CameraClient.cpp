@@ -17,6 +17,7 @@
 #define LOG_TAG "CameraClient"
 //#define LOG_NDEBUG 0
 
+#include <binder/MemoryBase.h>
 #include <cutils/atomic.h>
 #include <cutils/properties.h>
 #include <gui/Surface.h>
@@ -858,6 +859,7 @@ void CameraClient::notifyCallback(int32_t msgType, int32_t ext1,
     sp<CameraClient> client = getClientFromCookie(user);
     if (client.get() == nullptr) return;
 
+
     if (!client->lockIfMessageWanted(msgType)) return;
 
     switch (msgType) {
@@ -877,6 +879,28 @@ void CameraClient::dataCallback(int32_t msgType,
 
     sp<CameraClient> client = getClientFromCookie(user);
     if (client.get() == nullptr) return;
+    // MTK HAL1 delivers JPEGs as MTK_CAMERA_MSG_EXT_DATA (0x80000000), with a
+    // small header in front of the JPEG. Translate to CAMERA_MSG_COMPRESSED_IMAGE.
+    if (msgType == static_cast<int32_t>(0x80000000) && dataPtr != 0) {
+        ssize_t offset = 0;
+        size_t size = 0;
+        sp<IMemoryHeap> heap = dataPtr->getMemory(&offset, &size);
+        const uint8_t* base = heap != 0 ? static_cast<const uint8_t*>(heap->base()) : nullptr;
+        if (base != nullptr && size > 8) {
+            const uint8_t* p = base + offset;
+            size_t soi = 0;
+            while (soi < 64 && soi + 1 < size && !(p[soi] == 0xFF && p[soi + 1] == 0xD8)) soi += 4;
+            ALOGI("MTK ext data: type 0x%x, size %zu, jpeg at +%zu",
+                    *reinterpret_cast<const uint32_t*>(p), size, soi);
+            if (soi < 64 && soi + 1 < size && p[soi] == 0xFF && p[soi + 1] == 0xD8) {
+                sp<MemoryBase> image = new MemoryBase(heap, offset + soi, size - soi);
+                if (!client->lockIfMessageWanted(CAMERA_MSG_COMPRESSED_IMAGE)) return;
+                client->handleCompressedPicture(image);
+            }
+        }
+        return;
+    }
+
 
     if (!client->lockIfMessageWanted(msgType)) return;
     if (dataPtr == 0 && metadata == NULL) {
@@ -910,6 +934,7 @@ void CameraClient::dataCallbackTimestamp(nsecs_t timestamp,
 
     sp<CameraClient> client = getClientFromCookie(user);
     if (client.get() == nullptr) return;
+
 
     if (!client->lockIfMessageWanted(msgType)) return;
 
